@@ -10,6 +10,7 @@ if __name__ == "__main__" and os.path.basename(os.getcwd()) != "agente_logseq" a
 from src.agente_logseq.agent import LogseqAgent
 from src.agente_logseq.config import settings, configure_logging
 from src.agente_logseq.analysis_agent import AnalysisAgent
+from src.rag.indexer import LogseqIndexer
 
 
 def get_multiline_input(prompt: str) -> str:
@@ -163,6 +164,24 @@ def run_agent_cli():
         if user_input_block.lower() in ["exit", "quit"]:
             print("TARS > Deactivating. It was a pleasure to serve.")
             break
+
+        # Comandos de depuración RAG: deben ir antes de cualquier otro chequeo
+        if user_input_block.strip().lower() == "contar chunks rag":
+            indexer = LogseqIndexer(settings.DEFAULT_LOGSEQ_GRAPH_PATH)
+            print(f"DEBUG: Usando índice en: {indexer.chroma_path}")
+            count = indexer.count_indexed_chunks()
+            print(f"TARS > Chunks indexados en RAG: {count}")
+            continue
+        elif user_input_block.strip().lower() == "ver chunks rag":
+            indexer = LogseqIndexer(settings.DEFAULT_LOGSEQ_GRAPH_PATH)
+            print(f"DEBUG: Usando índice en: {indexer.chroma_path}")
+            chunks = indexer.get_sample_chunks(5)
+            print("TARS > Primeros 5 chunks indexados en RAG:")
+            for i, chunk in enumerate(chunks, 1):
+                print(f"{i}. ID: {chunk['id']}")
+                print(f"   Texto: {chunk['document']}")
+                print(f"   Metadatos: {chunk['metadata']}")
+            continue
 
         # --- NUEVO: crear grafo desde comando conversacional ---
         elif is_create_graph_query(user_input_block):

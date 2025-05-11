@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from src.agente_logseq.config import settings
 from src.models import KnowledgeGraphPlan, Task
+from src.rag.search import LogseqSemanticSearcher
 
 SearchableLocation = Literal["pages", "journals", "tasks"]
 
@@ -125,6 +126,7 @@ class LogseqAgent:
         self.get_task_logbook = self.llm.tool(self.get_task_logbook)
         self.search_tasks = self.llm.tool(self.search_tasks)
         self.create_task = self.llm.tool(self.create_task)
+        self.semantic_search_rag = self.llm.tool(self.semantic_search_rag)
 
     def _sanitize_filename(self, title: str) -> str:
         """
@@ -451,7 +453,7 @@ class LogseqAgent:
     def handle_search_query(self, query_text: str) -> str:
         """
         Processes a search query from the user by guiding the LLM to use the
-        'search_logseq_graph' tool.
+        'search_logseq_graph' tool or 'semantic_search_rag' tool as appropriate.
 
         Args:
             query_text: The user's search query.
@@ -463,42 +465,22 @@ class LogseqAgent:
 
         system_prompt_text = (
             "You are TARS, a highly intelligent and articulate AI. Your responses are formal, concise, and task-oriented. "
-            "Your current task is to use the 'search_logseq_graph' tool to find information "
-            "within the Logseq graph based on the user's query. "
-            "The tool will return a StructuredSearchResults object. You need to parse this object "
-            "and present the findings in a clear, organized, and human-readable Markdown format. "
-            "Group results by Pages and Journals. For each page, list its title (filename), then any content snippets and tasks found. "
-            "For journals, list the date (filename), then content snippets and tasks."
+            "For general or open-ended queries, you should use the 'semantic_search_rag' tool to retrieve the most relevant blocks from the Logseq graph using semantic similarity. "
+            "For very specific or structured queries (e.g., by page name, task status), you may use the 'search_logseq_graph' tool. "
+            "After retrieving results, present them in a clear, organized, and human-readable Markdown format. "
+            "Always mention if the results come from a semantic (RAG) search. "
+            "Group results by Pages and Journals if possible. For each result, show the content, filename, and line number. "
         )
 
         user_prompt_text = f"""
         The user's input is: "{query_text}"
-        Your task is to identify the actual search terms from the user's input. For example, if the user says "Busca Parlante Satelite", the core search terms are "Parlante Satelite".
-        Then, use the 'search_logseq_graph' tool with these extracted search terms as the 'query' parameter.
-
-        If relevant, you can also suggest a search scope (e.g., ["pages"], ["journals"], ["tasks"], or a combination) for the 'search_in' parameter of the tool, but this is optional.
-        After the tool call (which returns a StructuredSearchResults object), format its `pages` and `journals` lists into a user-friendly Markdown response.
-        If no results are found in the structured object, inform the user clearly.
-        Example of desired output format if results are found:
-        TARS > Affirmative. The search for "[Your Extracted Query]" yielded:
-
-        **Pages:**
-        *   **Page Title 1** (`filename1.md`)
-            *   Content: "Snippet 1 from page 1..."
-            *   Content: "Snippet 2 from page 1..."
-            *   Task: "TODO: Task A on page 1"
-        *   **Page Title 2** (`filename2.md`)
-            *   Task: "DONE: Task B on page 2"
-
-        **Journal Entries:**
-        *   **Journal Date 1** (`date1.md`)
-            *   Content: "Snippet from journal 1..."
-
-        Please specify if further detail is required.
+        Your task is to decide whether to use 'semantic_search_rag' (for open/general queries) or 'search_logseq_graph' (for structured/precise queries). 
+        If in doubt, prefer 'semantic_search_rag'.
+        After the tool call, format the results as Markdown, indicating the source (RAG or structured search).
         """
 
         try:
-            logfire.info("Sending search query to LLM to utilize 'search_logseq_graph' tool...")
+            logfire.info("Sending search query to LLM to utilize RAG or structured search tool...")
             response = self.llm.run_sync(user_prompt_text, system_prompt=system_prompt_text)
             
             if response and hasattr(response, 'output') and response.output:
@@ -1089,3 +1071,22 @@ class LogseqAgent:
                 exc_info=True
             )
             return f"TARS > Error del sistema durante la creación de tarea: {str(e)}. Diagnóstico detallado en logs." 
+
+    def semantic_search_rag(
+        self,
+        ctx: AnyRunContext,
+        query: str,
+        n_results: int = 5
+    ) -> dict:
+        """
+        Herramienta Pydantic AI: Realiza una búsqueda semántica (RAG) en el grafo Logseq usando ChromaDB.
+        Args:
+            ctx: Contexto de ejecución Pydantic AI.
+            query: Consulta de búsqueda semántica.
+            n_results: Número de resultados relevantes a devolver.
+        Returns:
+            Diccionario con los chunks más relevantes y sus metadatos.
+        """
+        searcher = LogseqSemanticSearcher(self.logseq_graph_path)
+        hits = searcher.semantic_search(query, n_results=n_results)
+        return {"results": hits} 
