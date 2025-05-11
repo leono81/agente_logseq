@@ -118,6 +118,14 @@ def extract_plan_file_path(text: str) -> str:
     m = re.match(r"^\s*crear(\s+el)?(\s+un)?\s*plan\s+(/.+)$", text, re.IGNORECASE)
     return m.group(3).strip() if m else None
 
+def is_create_task_query(text: str) -> bool:
+    """Detecta si el input es una orden de crear tarea."""
+    text_lower = text.lower()
+    create_keywords = [
+        "crear tarea", "nueva tarea", "agregar tarea", "añadir tarea", "add task", "new task", "create task"
+    ]
+    return any(keyword in text_lower for keyword in create_keywords)
+
 def run_agent_cli():
     # Logging should be configured by the time LogseqAgent or settings are imported
     # via src.agente_logseq.__init__.py, but an explicit call here can ensure it
@@ -232,11 +240,15 @@ def run_agent_cli():
                 print(f"TARS > Error al analizar o crear el grafo: {e}")
             continue
 
-        # Nuevo orden de checks: Update de tarea, luego listado, luego búsqueda avanzada, logbook, importar plan, búsqueda, luego creación
+        # Nuevo orden de checks: Update de tarea, luego creación, luego listado, luego búsqueda avanzada, logbook, importar plan, búsqueda, luego creación
         if is_task_update_query(user_input_block):
             print("TARS > Interpretando como orden de actualización de tarea. Stand by.")
             logfire.info(f"User input identified as task update query: '{user_input_block}'")
             response = agent.handle_update_task_status_query(user_input_block)
+        elif is_create_task_query(user_input_block):
+            print("TARS > Interpretando como creación de tarea. Stand by.")
+            logfire.info(f"User input identified as create task query: '{user_input_block}'")
+            response = agent.handle_create_task_query(user_input_block)
         elif is_task_list_query(user_input_block):
             print("TARS > Interpreting as task list query. Stand by.")
             logfire.info(f"User input identified as task list query: '{user_input_block}'")

@@ -10,7 +10,7 @@ from pydantic_ai.messages import SystemPromptPart, UserPromptPart
 from pydantic import BaseModel, Field
 
 from src.agente_logseq.config import settings
-from src.models import KnowledgeGraphPlan
+from src.models import KnowledgeGraphPlan, Task
 
 SearchableLocation = Literal["pages", "journals", "tasks"]
 
@@ -31,9 +31,7 @@ class JournalMatch(BaseModel):
     tasks_found: List[str] = Field(default_factory=list)
     match_type: Literal["content", "task"] = "content"
 
-class TaskMatch(BaseModel):
-    description: str
-    status: str # e.g., "TODO", "DONE"
+class TaskMatch(Task):
     source_filename: str
     source_path: str
     source_type: Literal["page", "journal"]
@@ -41,6 +39,7 @@ class TaskMatch(BaseModel):
     # For journal tasks, we might infer date from filename later if needed
     source_page_title: Optional[str] = None 
     source_journal_date_str: Optional[str] = None
+    tags: Optional[List[str]] = None
 
 class StructuredSearchResults(BaseModel):
     query: str
@@ -125,6 +124,7 @@ class LogseqAgent:
         self.update_task_status = self.llm.tool(self.update_task_status)
         self.get_task_logbook = self.llm.tool(self.get_task_logbook)
         self.search_tasks = self.llm.tool(self.search_tasks)
+        self.create_task = self.llm.tool(self.create_task)
 
     def _sanitize_filename(self, title: str) -> str:
         """
@@ -143,29 +143,22 @@ class LogseqAgent:
     # Tool registration will be handled by _register_tools
     def create_logseq_page(
         self,
-        ctx: AnyRunContext, # Added ctx parameter for tool compatibility
+        ctx: AnyRunContext,
         title: str,
-        content_summary: str,
-        properties: Optional[Dict[str, str]] = None,
-        related_page_titles: Optional[List[str]] = None
+        content: str,
+        properties: Optional[dict] = None,
+        related_pages: Optional[list] = None
     ) -> str:
         """
-        Creates a new page file in the Logseq graph structure.
-        The LLM calls this function with analyzed data to generate Logseq pages.
-
+        Herramienta Pydantic AI: Crea una nueva página de Logseq (archivo Markdown) con propiedades y enlaces.
         Args:
-            ctx: The Pydantic AI run context (automatically passed by the agent).
-            title: The title for the Logseq page. This is also used for the filename.
-            content_summary: The main textual content for the page. 
-                             The LLM should embed Markdown links (e.g., [[Other Page Title]])
-                             directly within this summary where appropriate for navigation.
-            properties: A dictionary of properties to add to the page (e.g., {"type": "concept"}).
-                        Defaults for 'type' ('concept') and 'source' ('chat_input') are applied.
-            related_page_titles: A list of page titles that this page is conceptually related to.
-                                 These will be formatted and added to a 'related::' property.
-
+            ctx: Contexto de ejecución Pydantic AI.
+            title: Título de la página.
+            content: Contenido principal de la página.
+            properties: Diccionario de propiedades (opcional).
+            related_pages: Lista de títulos de páginas relacionadas (opcional).
         Returns:
-            A string confirming the action or reporting an error. This feedback is crucial for the LLM.
+            Mensaje de confirmación o error.
         """
         logfire.info(f"Tool 'create_logseq_page' invoked for title: '{title}'")
         
@@ -178,8 +171,8 @@ class LogseqAgent:
         effective_properties.setdefault("type", "concept")
         effective_properties.setdefault("source", "chat_input")
 
-        if related_page_titles:
-            valid_related_titles = [rt.strip() for rt in related_page_titles if rt and rt.strip()]
+        if related_pages:
+            valid_related_titles = [rt.strip() for rt in related_pages if rt and rt.strip()]
             if valid_related_titles:
                 related_links_str = ", ".join([f"[[{page_title}]]" for page_title in valid_related_titles])
                 if "related" in effective_properties and effective_properties["related"]:
@@ -193,7 +186,7 @@ class LogseqAgent:
         if page_content_parts:
             page_content_parts.append("") 
 
-        page_content_parts.append(content_summary)
+        page_content_parts.append(content)
         final_page_content = "\n".join(page_content_parts)
 
         try:
@@ -216,19 +209,13 @@ class LogseqAgent:
         search_in: Optional[List[SearchableLocation]] = None
     ) -> StructuredSearchResults:
         """
-        Searches the Logseq graph for a given query string using Pydantic models.
-        Can search in pages, journals, and identify TODO tasks.
-        The search is case-insensitive.
-
+        Herramienta Pydantic AI: Busca contenido en el grafo Logseq (páginas, diarios, tareas) según un texto o patrón.
         Args:
-            ctx: The Pydantic AI run context (automatically passed by the agent).
-            query: The text to search for.
-            search_in: Optional list to specify search scope: ["pages", "journals", "tasks"].
-                       If None or empty, searches pages and journals for general content, and all locations for tasks.
-                       If "tasks" is specified, it will specifically look for task keywords.
-
+            ctx: Contexto de ejecución Pydantic AI.
+            query: Texto o patrón a buscar en el contenido de Logseq.
+            search_in: Lista opcional de ubicaciones a buscar ("pages", "journals", "tasks").
         Returns:
-            A StructuredSearchResults object containing found pages and journals.
+            StructuredSearchResults con los resultados encontrados en páginas y diarios.
         """
         logfire.info(f"Tool 'search_logseq_graph' invoked for query: '{query}', scope: {search_in}")
         
@@ -337,15 +324,12 @@ class LogseqAgent:
         status_filter: Optional[List[str]] = None
     ) -> StructuredTaskResults:
         """
-        Retrieves all tasks from the Logseq graph, optionally filtered by status.
-
+        Herramienta Pydantic AI: Recupera todas las tareas del grafo Logseq, opcionalmente filtradas por estado.
         Args:
-            ctx: The Pydantic AI run context.
-            status_filter: A list of task statuses to filter by (e.g., ["TODO", "DONE"]). 
-                           Case-insensitive. If None, all tasks are returned.
-
+            ctx: Contexto de ejecución Pydantic AI.
+            status_filter: Lista de estados de tarea para filtrar (opcional, e.g., ["TODO", "DONE"]).
         Returns:
-            A StructuredTaskResults object containing the found tasks.
+            StructuredTaskResults con la lista de tareas encontradas y el filtro aplicado.
         """
         logfire.info(f"Tool 'get_all_tasks' invoked. Status filter: {status_filter}")
         found_tasks: List[TaskMatch] = []
@@ -388,10 +372,13 @@ class LogseqAgent:
 
                             if canonical_status: # It's a recognized task status
                                 if effective_status_filter is None or canonical_status in effective_status_filter:
+                                    # Extraer tags de la descripción
+                                    tags = re.findall(r"#(\w+)", task_description)
                                     found_tasks.append(
                                         TaskMatch(
                                             description=task_description,
                                             status=canonical_status,
+                                            tags=tags if tags else None,
                                             source_filename=basename,
                                             source_path=filepath,
                                             source_type=file_type,
@@ -413,14 +400,14 @@ class LogseqAgent:
         new_status: str
     ) -> str:
         """
-        Updates the status of a task in a Logseq file, supporting both keyword and checkbox formats.
+        Herramienta Pydantic AI: Actualiza el estado de una tarea en un archivo Logseq.
         Args:
-            ctx: The Pydantic AI run context.
-            source_filename: The file where the task resides (e.g., 'Parlante Satelite.md').
-            line_number: The 1-based line number of the task in the file.
-            new_status: The new status (e.g., 'DONE', '[x]', 'TODO', '[ ]', etc.).
+            ctx: Contexto de ejecución Pydantic AI.
+            source_filename: Archivo donde reside la tarea.
+            line_number: Línea (1-based) de la tarea en el archivo.
+            new_status: Nuevo estado (e.g., 'DONE', '[x]', 'TODO', '[ ]', etc.).
         Returns:
-            A confirmation message or error.
+            Mensaje de confirmación o error.
         """
         logfire.info(f"Tool 'update_task_status' invoked for file: {source_filename}, line: {line_number}, new_status: {new_status}")
         abs_path = os.path.join(self.logseq_pages_path, source_filename)
@@ -762,7 +749,7 @@ class LogseqAgent:
         line_number: int
     ) -> TaskLogbookResult:
         """
-        Extrae el contenido de :LOGBOOK: para una tarea específica en un archivo Logseq.
+        Herramienta Pydantic AI: Extrae el contenido de :LOGBOOK: para una tarea específica en un archivo Logseq.
         Args:
             ctx: Contexto de ejecución Pydantic AI.
             source_filename: Nombre del archivo donde está la tarea.
@@ -839,7 +826,7 @@ class LogseqAgent:
         tag_filter: Optional[str] = None
     ) -> SearchTasksResult:
         """
-        Busca tareas en el grafo Logseq por texto y/o etiqueta, con opción de filtrar por estado.
+        Herramienta Pydantic AI: Busca tareas en el grafo Logseq por texto y/o etiqueta, con opción de filtrar por estado.
         Args:
             ctx: Contexto de ejecución Pydantic AI.
             query: Texto a buscar en la descripción de la tarea.
@@ -881,10 +868,12 @@ class LogseqAgent:
                                     continue
                                 if tag_filter and f"#{tag_filter.lower()}" not in task_description.lower():
                                     continue
+                                tags = re.findall(r"#(\w+)", task_description)
                                 found_tasks.append(
                                     TaskMatch(
                                         description=task_description,
                                         status=canonical_status,
+                                        tags=tags if tags else None,
                                         source_filename=basename,
                                         source_path=filepath,
                                         source_type=file_type,
@@ -995,3 +984,108 @@ class LogseqAgent:
                         f.write(f"- [[{related}]]\n")
             created.append(page.title)
         return f"TARS > Grafo creado. Páginas generadas: {', '.join(created)}" 
+
+    def create_task(
+        self,
+        ctx: AnyRunContext,
+        description: str,
+        status: str = "TODO",
+        page: Optional[str] = None,
+        journal_date: Optional[str] = None
+    ) -> str:
+        """
+        Herramienta Pydantic AI: Crea una nueva tarea (línea TODO) en Logseq.
+        Args:
+            ctx: Contexto de ejecución Pydantic AI.
+            description: Descripción de la tarea.
+            status: Estado de la tarea (por defecto "TODO").
+            page: Nombre de la página destino (opcional). Si no se especifica, se usará el diario.
+            journal_date: Fecha del diario (YYYY_MM_DD, opcional). Si no se especifica, se usará el diario de hoy.
+        Returns:
+            Mensaje de confirmación o error.
+        """
+        import datetime
+        # Determinar archivo destino
+        if page:
+            filename = self._sanitize_filename(page) + ".md"
+            filepath = os.path.join(self.logseq_pages_path, filename)
+            heading = None
+        else:
+            if journal_date:
+                filename = f"{journal_date}.md"
+            else:
+                today = datetime.date.today()
+                filename = today.strftime("%Y_%m_%d.md")
+            filepath = os.path.join(self.logseq_journals_path, filename)
+            heading = None
+        # Formato de la tarea
+        task_line = f"- {status.upper()} {description.strip()}\n"
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Si el archivo existe, agregar al final; si no, crear
+            if os.path.exists(filepath):
+                with open(filepath, "a", encoding="utf-8") as f:
+                    f.write(task_line)
+            else:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(task_line)
+            return f"Tarea creada: '{description.strip()}' en '{filename}' con estado '{status.upper()}'."
+        except Exception as e:
+            return f"Error al crear la tarea: {str(e)}" 
+
+    def handle_create_task_query(self, user_query_text: str) -> str:
+        """
+        Orquesta la creación de una nueva tarea en Logseq a partir de una orden conversacional.
+        1. Extrae del texto del usuario la descripción de la tarea y, si se especifica, el estado, página o fecha.
+        2. Llama a la herramienta 'create_task' con los argumentos correctos.
+        3. Responde siempre de forma formal y concisa (TARS).
+        """
+        logfire.info(f"Handling create task query: '{user_query_text}'")
+
+        system_prompt_text = (
+            "Eres TARS, un asistente formal y conciso. Si el usuario pide crear, agregar o añadir una tarea, "
+            "debes: 1) extraer la descripción de la tarea, 2) si el usuario especifica el estado (ej: DONE, NOW, LATER), úsalo, si no, usa 'TODO', "
+            "3) si el usuario especifica una página destino o fecha de diario, pásala como argumento, si no, usa el diario de hoy. "
+            "Llama a la herramienta 'create_task' con los argumentos correctos. "
+            "Responde con una confirmación formal y breve. Si hay error, informa formalmente."
+        )
+
+        user_prompt_text = f"""
+        El usuario ha dicho: "{user_query_text}"
+
+        1. Extrae la descripción de la tarea (por ejemplo, en 'crear tarea: Comprar entradas', la descripción es 'Comprar entradas').
+        2. Si el usuario especifica el estado (ej: DONE, NOW, LATER), úsalo, si no, usa 'TODO'.
+        3. Si el usuario especifica una página destino (ej: en la página 'Proyectos') o una fecha de diario (ej: en el diario 2024_06_01), pásala como argumento, si no, usa el diario de hoy.
+        4. Llama a la herramienta 'create_task' con los argumentos correctos.
+        5. Responde con una confirmación formal y breve. Si hay error, informa formalmente.
+
+        Ejemplo de respuesta si se crea:
+        TARS > Tarea "Comprar entradas" creada correctamente en el diario de hoy.
+
+        Ejemplo si hay error:
+        TARS > Error al crear la tarea: [detalle].
+        """
+
+        try:
+            logfire.info("Enviando orden de creación de tarea al LLM...")
+            response = self.llm.run_sync(user_prompt_text, system_prompt=system_prompt_text)
+
+            final_llm_message = ""
+            if response and hasattr(response, 'output') and response.output:
+                final_llm_message = response.output
+            elif response and hasattr(response, 'message') and response.message and hasattr(response.message, 'content'):
+                final_llm_message = response.message.content
+            else:
+                logfire.warning(f"LLM response for create task was empty/unexpected. Response: {response}")
+                return "TARS > Creación de tarea intentada. No se obtuvo respuesta clara del LLM."
+
+            logfire.info(f"LLM final response for create task: '{final_llm_message}'")
+            return final_llm_message.strip() if final_llm_message and final_llm_message.strip() else "TARS > Tarea creada o procesada."
+
+        except Exception as e:
+            logfire.error(
+                "Error durante el procesamiento LLM para creación de tarea: {error_details}", 
+                error_details=str(e), 
+                exc_info=True
+            )
+            return f"TARS > Error del sistema durante la creación de tarea: {str(e)}. Diagnóstico detallado en logs." 
