@@ -55,6 +55,24 @@ class StructuredTaskResults(BaseModel): # New model for get_all_tasks
     tasks: List[TaskMatch]
     filter_applied: Optional[List[str]] = None
 
+class TaskLogbookEntry(BaseModel):
+    clock_lines: list[str] = Field(default_factory=list)
+    raw_logbook: str = ""
+
+class TaskLogbookResult(BaseModel):
+    description: str
+    status: str
+    source_filename: str
+    line_number: int
+    logbook: TaskLogbookEntry
+    error: Optional[str] = None
+
+class SearchTasksResult(BaseModel):
+    tasks: list[TaskMatch]
+    query: str
+    status_filter: Optional[list[str]] = None
+    tag_filter: Optional[str] = None
+
 # --- End Pydantic Models ---
 
 # Define a generic RunContext for tool type hinting
@@ -100,12 +118,12 @@ class LogseqAgent:
 
     def _register_tools(self):
         """Helper method to explicitly register tools with the LLM agent."""
-        # This redefines the methods as tool-wrapped versions.
         self.create_logseq_page = self.llm.tool(self.create_logseq_page)
         self.search_logseq_graph = self.llm.tool(self.search_logseq_graph)
-        self.get_all_tasks = self.llm.tool(self.get_all_tasks) # Register new tool
-        self.update_task_status = self.llm.tool(self.update_task_status) # Register update tool
-        # handle_search_query is a Python-driven method, not an LLM tool directly callable by the LLM.
+        self.get_all_tasks = self.llm.tool(self.get_all_tasks)
+        self.update_task_status = self.llm.tool(self.update_task_status)
+        self.get_task_logbook = self.llm.tool(self.get_task_logbook)
+        self.search_tasks = self.llm.tool(self.search_tasks)
 
     def _sanitize_filename(self, title: str) -> str:
         """
@@ -687,7 +705,7 @@ class LogseqAgent:
         )
 
         user_prompt_text = f"""
-        El usuario ha dicho: \"{user_query_text}\"
+        El usuario ha dicho: "{user_query_text}"
 
         1. Extrae el nombre de la tarea y el estado deseado (por defecto, 'DONE' si no se especifica explícitamente otro estado como 'pendiente', 'en progreso', etc.).
         2. Busca la tarea usando 'get_all_tasks' (sin filtro o con filtro flexible si el usuario especifica el estado actual).
@@ -700,16 +718,16 @@ class LogseqAgent:
         6. Responde siempre como TARS, de forma formal y concisa.
 
         Ejemplo de respuesta si se actualiza:
-        TARS > Tarea \"Mejorar la voz\" marcada como completada en [Parlante Satelite.md, línea 7]. ¿Desea realizar otra acción?
+        TARS > Tarea "Mejorar la voz" marcada como completada en [Parlante Satelite.md, línea 7]. ¿Desea realizar otra acción?
 
         Ejemplo si hay varias coincidencias:
-        TARS > Se encontraron varias tareas que coinciden con \"Mejorar la voz\":
+        TARS > Se encontraron varias tareas que coinciden con "Mejorar la voz":
         * Mejorar la voz [Parlante Satelite.md, línea 7]
         * Mejorar la voz del asistente [Notas.md, línea 12]
         Por favor, indique con mayor precisión cuál desea actualizar.
 
         Ejemplo si no se encuentra:
-        TARS > No se encontró ninguna tarea que coincida con \"Mejorar la voz\".
+        TARS > No se encontró ninguna tarea que coincida con "Mejorar la voz".
         """
 
         try:
@@ -735,3 +753,218 @@ class LogseqAgent:
                 exc_info=True
             )
             return f"TARS > Error del sistema durante la actualización de tarea: {str(e)}. Diagnóstico detallado en logs." 
+
+    def get_task_logbook(
+        self,
+        ctx: AnyRunContext,
+        source_filename: str,
+        line_number: int
+    ) -> TaskLogbookResult:
+        """
+        Extrae el contenido de :LOGBOOK: para una tarea específica en un archivo Logseq.
+        Args:
+            ctx: Contexto de ejecución Pydantic AI.
+            source_filename: Nombre del archivo donde está la tarea.
+            line_number: Línea (1-based) donde está la tarea.
+        Returns:
+            TaskLogbookResult con el contenido de :LOGBOOK: (clock_lines y raw_logbook).
+        """
+        abs_path = os.path.join(self.logseq_pages_path, source_filename)
+        if not os.path.exists(abs_path):
+            abs_path = os.path.join(self.logseq_journals_path, source_filename)
+            if not os.path.exists(abs_path):
+                return TaskLogbookResult(
+                    description="",
+                    status="",
+                    source_filename=source_filename,
+                    line_number=line_number,
+                    logbook=TaskLogbookEntry(),
+                    error=f"Archivo '{source_filename}' no encontrado."
+                )
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            idx = line_number - 1
+            if idx < 0 or idx >= len(lines):
+                return TaskLogbookResult(
+                    description="",
+                    status="",
+                    source_filename=source_filename,
+                    line_number=line_number,
+                    logbook=TaskLogbookEntry(),
+                    error=f"Línea {line_number} fuera de rango en '{source_filename}'."
+                )
+            # Buscar el bloque :LOGBOOK: debajo de la tarea
+            logbook_lines = []
+            in_logbook = False
+            for l in lines[idx+1:]:
+                if l.strip().startswith(":LOGBOOK:"):
+                    in_logbook = True
+                    continue
+                if in_logbook:
+                    if l.strip().startswith(":END:"):
+                        break
+                    logbook_lines.append(l.rstrip())
+                # Si hay otro bloque o tarea, salir
+                if not in_logbook and (l.strip().startswith("- ") or l.strip().startswith("* ")):
+                    break
+            # Extraer descripción y status de la tarea
+            match = re.match(r"^\s*[-*]?\s*([A-Z]+)\s+(.*)", lines[idx].strip())
+            status = match.group(1) if match else ""
+            description = match.group(2) if match else lines[idx].strip()
+            return TaskLogbookResult(
+                description=description,
+                status=status,
+                source_filename=source_filename,
+                line_number=line_number,
+                logbook=TaskLogbookEntry(clock_lines=logbook_lines, raw_logbook="\n".join(logbook_lines)),
+                error=None
+            )
+        except Exception as e:
+            return TaskLogbookResult(
+                description="",
+                status="",
+                source_filename=source_filename,
+                line_number=line_number,
+                logbook=TaskLogbookEntry(),
+                error=str(e)
+            )
+
+    def search_tasks(
+        self,
+        ctx: AnyRunContext,
+        query: str,
+        status_filter: Optional[list[str]] = None,
+        tag_filter: Optional[str] = None
+    ) -> SearchTasksResult:
+        """
+        Busca tareas en el grafo Logseq por texto y/o etiqueta, con opción de filtrar por estado.
+        Args:
+            ctx: Contexto de ejecución Pydantic AI.
+            query: Texto a buscar en la descripción de la tarea.
+            status_filter: Lista de estados de tarea a filtrar (opcional).
+            tag_filter: Etiqueta (sin #) a filtrar (opcional).
+        Returns:
+            SearchTasksResult con la lista de tareas encontradas.
+        """
+        found_tasks: list[TaskMatch] = []
+        task_keywords_map = {
+            "TODO": "TODO", "LATER": "LATER", "NOW": "NOW", "DOING": "DOING",
+            "DONE": "DONE", "WAITING": "WAITING", "CANCELED": "CANCELED", "CANCELLED": "CANCELLED"
+        }
+        effective_status_filter = [sf.upper() for sf in status_filter] if status_filter else None
+        files_to_scan = []
+        if os.path.exists(self.logseq_pages_path):
+            for filename in os.listdir(self.logseq_pages_path):
+                if filename.endswith(".md"):
+                    files_to_scan.append((os.path.join(self.logseq_pages_path, filename), "page", filename))
+        if os.path.exists(self.logseq_journals_path):
+            for filename in os.listdir(self.logseq_journals_path):
+                if filename.endswith(".md"):
+                    files_to_scan.append((os.path.join(self.logseq_journals_path, filename), "journal", filename))
+        for filepath, file_type, basename in files_to_scan:
+            page_title = basename[:-3] if file_type == "page" else None
+            journal_date_str = basename[:-3] if file_type == "journal" else None
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    for i, line_content in enumerate(f):
+                        match = re.match(r"^\s*[-*]?\s*([A-Z]+)\s+(.*)", line_content.strip())
+                        if match:
+                            task_status_candidate = match.group(1).upper()
+                            task_description = match.group(2).strip()
+                            canonical_status = task_keywords_map.get(task_status_candidate)
+                            if canonical_status:
+                                if effective_status_filter and canonical_status not in effective_status_filter:
+                                    continue
+                                if query and query.lower() not in task_description.lower():
+                                    continue
+                                if tag_filter and f"#{tag_filter.lower()}" not in task_description.lower():
+                                    continue
+                                found_tasks.append(
+                                    TaskMatch(
+                                        description=task_description,
+                                        status=canonical_status,
+                                        source_filename=basename,
+                                        source_path=filepath,
+                                        source_type=file_type,
+                                        line_number=i + 1,
+                                        source_page_title=page_title,
+                                        source_journal_date_str=journal_date_str
+                                    )
+                                )
+            except Exception as e:
+                continue
+        return SearchTasksResult(tasks=found_tasks, query=query, status_filter=status_filter, tag_filter=tag_filter) 
+
+    def handle_task_logbook_query(self, user_query_text: str) -> str:
+        """
+        Orquesta la consulta de historial/logbook de una tarea a partir de una orden conversacional.
+        1. Extrae del texto del usuario el nombre de la tarea (o referencia).
+        2. Busca la tarea usando search_tasks (sin filtro o con filtro flexible).
+        3. Si hay coincidencia única, llama a get_task_logbook con los parámetros correctos.
+        4. Si hay varias coincidencias, muestra la lista breve (descripción, archivo, línea) y espera aclaración del usuario.
+        5. Si el usuario responde con un número, archivo+línea o referencia, muestra el logbook correspondiente.
+        6. Si no hay ninguna coincidencia, informa formalmente.
+        7. Responde siempre de forma formal y concisa (TARS).
+        """
+        logfire.info(f"Handling task logbook query: '{user_query_text}'")
+
+        system_prompt_text = (
+            "Eres TARS, un asistente formal y conciso. Si el usuario pide el historial, logbook o seguimiento de una tarea, "
+            "debes: 1) extraer el nombre o referencia de la tarea, 2) buscar la tarea usando 'search_tasks' (sin filtro salvo que el usuario especifique), "
+            "3) si hay una coincidencia única, llama a 'get_task_logbook' con el archivo y línea correctos, "
+            "4) si hay varias coincidencias, muestra una lista breve (descripción, archivo, línea) y espera que el usuario aclare a cuál se refiere (por número, archivo+línea, etc.), "
+            "5) si el usuario responde con una referencia válida, muestra el logbook correspondiente, "
+            "6) si no hay ninguna coincidencia, informa formalmente. "
+            "Siempre responde de forma formal, breve y precisa. "
+            "Mantén el contexto conversacional para que el usuario pueda referirse a la tarea por número, descripción parcial, archivo o línea en turnos siguientes."
+        )
+
+        user_prompt_text = f"""
+        El usuario ha dicho: "{user_query_text}"
+
+        1. Si el usuario pide el historial, logbook o seguimiento de una tarea, busca la tarea por nombre o referencia usando 'search_tasks'.
+        2. Si hay una sola coincidencia, llama a 'get_task_logbook' con el archivo y línea correctos y muestra el resultado.
+        3. Si hay varias coincidencias, muestra una lista numerada (descripción, archivo, línea) y espera que el usuario aclare a cuál se refiere (por número, archivo+línea, etc.).
+        4. Si el usuario responde con una referencia válida, muestra el logbook correspondiente.
+        5. Si no hay ninguna coincidencia, informa formalmente.
+        6. Siempre responde como TARS, de forma formal y concisa.
+
+        Ejemplo de respuesta si se muestra el logbook:
+        TARS > LOGBOOK de la tarea "Mejorar la voz" [TODO] en Parlante Satelite.md, línea 8:
+          CLOCK: [2025-05-11 Sun 10:58:14]--[2025-05-11 Sun 10:58:16] =>  00:00:02
+          ...
+
+        Ejemplo si hay varias coincidencias:
+        TARS > Se encontraron varias tareas que coinciden con "Mejorar la voz":
+        1. Mejorar la voz [Parlante Satelite.md, línea 8]
+        2. Mejorar la voz del asistente [Notas.md, línea 12]
+        Por favor, indique el número o referencia de la tarea cuyo historial desea ver.
+
+        Ejemplo si no se encuentra:
+        TARS > No se encontró ninguna tarea que coincida con "Mejorar la voz".
+        """
+
+        try:
+            logfire.info("Enviando consulta de logbook de tarea al LLM...")
+            response = self.llm.run_sync(user_prompt_text, system_prompt=system_prompt_text)
+
+            final_llm_message = ""
+            if response and hasattr(response, 'output') and response.output:
+                final_llm_message = response.output
+            elif response and hasattr(response, 'message') and response.message and hasattr(response.message, 'content'):
+                final_llm_message = response.message.content
+            else:
+                logfire.warning(f"LLM response for task logbook query was empty/unexpected. Response: {response}")
+                return "TARS > Consulta de historial de tarea intentada. No se obtuvo respuesta clara del LLM."
+
+            logfire.info(f"LLM final response for task logbook query: '{final_llm_message}'")
+            return final_llm_message.strip() if final_llm_message and final_llm_message.strip() else "TARS > Consulta de historial de tarea procesada."
+
+        except Exception as e:
+            logfire.error(
+                "Error durante el procesamiento LLM para consulta de logbook de tarea: {error_details}", 
+                error_details=str(e), 
+                exc_info=True
+            )
+            return f"TARS > Error del sistema durante la consulta de historial de tarea: {str(e)}. Diagnóstico detallado en logs." 

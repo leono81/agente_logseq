@@ -76,6 +76,23 @@ def is_task_update_query(text: str) -> bool:
     ]
     return any(keyword in text_lower for keyword in update_keywords)
 
+def is_logbook_query(text: str) -> bool:
+    text_lower = text.lower()
+    return (
+        text_lower.startswith("logbook de tarea") or
+        text_lower.startswith("historial de tarea") or
+        text_lower.startswith("ver logbook de tarea") or
+        text_lower.startswith("ver historial de tarea")
+    )
+
+def is_advanced_task_search_query(text: str) -> bool:
+    text_lower = text.lower()
+    return (
+        text_lower.startswith("buscar tareas con") or
+        text_lower.startswith("buscar tareas que contengan") or
+        text_lower.startswith("buscar tareas por etiqueta")
+    )
+
 def run_agent_cli():
     # Logging should be configured by the time LogseqAgent or settings are imported
     # via src.agente_logseq.__init__.py, but an explicit call here can ensure it
@@ -114,7 +131,7 @@ def run_agent_cli():
             print("TARS > Deactivating. It was a pleasure to serve.")
             break
 
-        # Nuevo orden de checks: Update de tarea, luego listado, luego búsqueda, luego creación
+        # Nuevo orden de checks: Update de tarea, luego listado, luego búsqueda avanzada, logbook, búsqueda, luego creación
         if is_task_update_query(user_input_block):
             print("TARS > Interpretando como orden de actualización de tarea. Stand by.")
             logfire.info(f"User input identified as task update query: '{user_input_block}'")
@@ -123,6 +140,36 @@ def run_agent_cli():
             print("TARS > Interpreting as task list query. Stand by.")
             logfire.info(f"User input identified as task list query: '{user_input_block}'")
             response = agent.handle_get_all_tasks_query(user_input_block)
+        elif is_advanced_task_search_query(user_input_block):
+            print("TARS > Interpreting as advanced task search query. Stand by.")
+            logfire.info(f"User input identified as advanced task search query: '{user_input_block}'")
+            # Parse query, status, tag
+            # Ejemplo: 'buscar tareas con voz', 'buscar tareas con voz y estado TODO', 'buscar tareas con voz y etiqueta PorHacer'
+            import re
+            query = ""
+            status = None
+            tag = None
+            m = re.search(r"buscar tareas (?:que contengan|con) ([^\n]+)", user_input_block.lower())
+            if m:
+                query = m.group(1).strip()
+            m2 = re.search(r"estado ([a-zA-Z]+)", user_input_block.lower())
+            if m2:
+                status = [m2.group(1).upper()]
+            m3 = re.search(r"etiqueta ([^\s]+)", user_input_block.lower())
+            if m3:
+                tag = m3.group(1).strip().lstrip('#')
+            result = agent.search_tasks(None, query=query, status_filter=status, tag_filter=tag)
+            if not result.tasks:
+                response = f"TARS > No se encontraron tareas para la búsqueda '{query}'."
+            else:
+                lines = [f"TARS > Tareas encontradas para '{query}':"]
+                for t in result.tasks:
+                    lines.append(f"- [{t.status}] {t.description} ({t.source_filename}, línea {t.line_number})")
+                response = "\n".join(lines)
+        elif is_logbook_query(user_input_block):
+            print("TARS > Interpretando como consulta de logbook de tarea. Stand by.")
+            logfire.info(f"User input identified as logbook query: '{user_input_block}'")
+            response = agent.handle_task_logbook_query(user_input_block)
         elif is_search_query(user_input_block):
             print("TARS > Interpreting as search query. Stand by.")
             logfire.info(f"User input identified as search query: '{user_input_block}'")
