@@ -9,6 +9,7 @@ if __name__ == "__main__" and os.path.basename(os.getcwd()) != "agente_logseq" a
 
 from src.agente_logseq.agent import LogseqAgent
 from src.agente_logseq.config import settings, configure_logging
+from src.agente_logseq.analysis_agent import AnalysisAgent
 
 
 def get_multiline_input(prompt: str) -> str:
@@ -93,6 +94,30 @@ def is_advanced_task_search_query(text: str) -> bool:
         text_lower.startswith("buscar tareas por etiqueta")
     )
 
+def is_import_plan_query(text: str) -> bool:
+    text_lower = text.lower()
+    return text_lower.startswith("importar plan ")
+
+def is_create_graph_query(text: str) -> bool:
+    """Detecta variantes de 'crear el grafo de:', 'agregar grafo:', 'añadir grafo:' al inicio del input."""
+    import re
+    return bool(re.match(r"^\s*(crear|agregar|añadir)(\s+el)?(\s+un)?\s*grafo(\s+de)?\s*:\s*", text, re.IGNORECASE))
+
+def extract_graph_text(text: str) -> str:
+    import re
+    m = re.match(r"^\s*(crear|agregar|añadir)(\s+el)?(\s+un)?\s*grafo(\s+de)?\s*:\s*(.*)$", text, re.IGNORECASE | re.DOTALL)
+    return (m.group(5).strip() if m and m.group(5) is not None else text.strip())
+
+def is_create_plan_from_file_query(text: str) -> bool:
+    """Detecta 'crear plan <ruta>' al inicio del input."""
+    import re
+    return bool(re.match(r"^\s*crear(\s+el)?(\s+un)?\s*plan\s+/.+", text, re.IGNORECASE))
+
+def extract_plan_file_path(text: str) -> str:
+    import re
+    m = re.match(r"^\s*crear(\s+el)?(\s+un)?\s*plan\s+(/.+)$", text, re.IGNORECASE)
+    return m.group(3).strip() if m else None
+
 def run_agent_cli():
     # Logging should be configured by the time LogseqAgent or settings are imported
     # via src.agente_logseq.__init__.py, but an explicit call here can ensure it
@@ -101,7 +126,7 @@ def run_agent_cli():
 
     if not settings.OPENAI_API_KEY:
         print("TARS > Critical error: OPENAI_API_KEY environment variable is not set. Deactivating.")
-        logfire.critical("OPENAI_API_KEY not set at CLI startup.")
+        logfire.error("OPENAI_API_KEY not set at CLI startup.")
         sys.exit(1)
 
     if not settings.DEFAULT_LOGSEQ_GRAPH_PATH or not os.path.isdir(settings.DEFAULT_LOGSEQ_GRAPH_PATH):
@@ -131,7 +156,83 @@ def run_agent_cli():
             print("TARS > Deactivating. It was a pleasure to serve.")
             break
 
-        # Nuevo orden de checks: Update de tarea, luego listado, luego búsqueda avanzada, logbook, búsqueda, luego creación
+        # --- NUEVO: crear grafo desde comando conversacional ---
+        elif is_create_graph_query(user_input_block):
+            print("TARS > Analizando texto y creando grafo. Stand by.")
+            logfire.info("Flujo: crear grafo desde comando conversacional.")
+            text = extract_graph_text(user_input_block)
+            analyzer = AnalysisAgent()
+            try:
+                plan = analyzer.analyze_text_to_graph_plan(text)
+                msg = agent.create_logseq_graph_from_plan(plan)
+                print(f"TARS > {msg}")
+            except Exception as e:
+                logfire.error(f"Error en el flujo de crear grafo conversacional: {e}")
+                print(f"TARS > Error al analizar o crear el grafo: {e}")
+            continue
+
+        # --- NUEVO: crear grafo desde archivo de texto ---
+        elif is_create_plan_from_file_query(user_input_block):
+            file_path = extract_plan_file_path(user_input_block)
+            if not file_path or not os.path.isabs(file_path):
+                print("TARS > Error: Debes proporcionar una ruta absoluta al archivo de texto.")
+                continue
+            if not os.path.isfile(file_path):
+                print(f"TARS > Error: El archivo '{file_path}' no existe.")
+                continue
+            print(f"TARS > Analizando archivo '{file_path}' y creando grafo. Stand by.")
+            logfire.info(f"Flujo: crear grafo desde archivo de texto: {file_path}")
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            analyzer = AnalysisAgent()
+            try:
+                plan = analyzer.analyze_text_to_graph_plan(text)
+                msg = agent.create_logseq_graph_from_plan(plan)
+                print(f"TARS > {msg}")
+            except Exception as e:
+                logfire.error(f"Error en el flujo de crear grafo desde archivo: {e}")
+                print(f"TARS > Error al analizar o crear el grafo: {e}")
+            continue
+
+        elif is_import_plan_query(user_input_block):
+            print("TARS > Importando KnowledgeGraphPlan desde archivo. Stand by.")
+            import re
+            from src.models import KnowledgeGraphPlan
+            m = re.match(r"importar plan (.+)", user_input_block.strip(), re.IGNORECASE)
+            if not m:
+                print("TARS > Error: Sintaxis incorrecta. Usa: importar plan <ruta>")
+                continue
+            plan_path = m.group(1).strip()
+            if not os.path.isfile(plan_path):
+                print(f"TARS > Error: El archivo '{plan_path}' no existe.")
+                continue
+            with open(plan_path, "r", encoding="utf-8") as f:
+                plan_json = f.read()
+            try:
+                plan = KnowledgeGraphPlan.parse_raw(plan_json)
+            except Exception as e:
+                print(f"TARS > Error al procesar el plan: {e}")
+                continue
+            msg = agent.create_logseq_graph_from_plan(plan)
+            print(f"TARS > {msg}")
+            continue
+
+        # --- NUEVO FLUJO: crear grafo desde texto libre ---
+        elif user_input_block.strip().endswith('---'):
+            print("TARS > Analizando texto y creando grafo. Stand by.")
+            logfire.info("Flujo automático: análisis de texto y creación de grafo.")
+            text = user_input_block.strip().removesuffix('---').strip()
+            analyzer = AnalysisAgent()
+            try:
+                plan = analyzer.analyze_text_to_graph_plan(text)
+                msg = agent.create_logseq_graph_from_plan(plan)
+                print(f"TARS > {msg}")
+            except Exception as e:
+                logfire.error(f"Error en el flujo automático de grafo: {e}")
+                print(f"TARS > Error al analizar o crear el grafo: {e}")
+            continue
+
+        # Nuevo orden de checks: Update de tarea, luego listado, luego búsqueda avanzada, logbook, importar plan, búsqueda, luego creación
         if is_task_update_query(user_input_block):
             print("TARS > Interpretando como orden de actualización de tarea. Stand by.")
             logfire.info(f"User input identified as task update query: '{user_input_block}'")

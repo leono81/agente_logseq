@@ -9,7 +9,8 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.messages import SystemPromptPart, UserPromptPart
 from pydantic import BaseModel, Field
 
-from .config import settings
+from src.agente_logseq.config import settings
+from src.models import KnowledgeGraphPlan
 
 SearchableLocation = Literal["pages", "journals", "tasks"]
 
@@ -968,3 +969,29 @@ class LogseqAgent:
                 exc_info=True
             )
             return f"TARS > Error del sistema durante la consulta de historial de tarea: {str(e)}. Diagnóstico detallado en logs." 
+
+    def create_logseq_graph_from_plan(self, plan: 'KnowledgeGraphPlan') -> str:
+        """
+        Crea páginas y enlaces en Logseq a partir de un KnowledgeGraphPlan.
+        Args:
+            plan: KnowledgeGraphPlan (modelo Pydantic) con la estructura del grafo.
+        Returns:
+            Mensaje de confirmación con el resumen de páginas creadas.
+        """
+        created = []
+        for page in plan.pages:
+            filename = self._sanitize_filename(page.title) + ".md"
+            filepath = os.path.join(self.logseq_pages_path, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                # Escribir propiedades
+                for key, value in (page.properties or {}).items():
+                    f.write(f"{key}:: {value}\n")
+                f.write("\n")
+                # Escribir resumen/contenido
+                f.write(page.content_summary.strip() + "\n\n")
+                # Escribir enlaces a páginas relacionadas
+                if page.related_page_titles:
+                    for related in page.related_page_titles:
+                        f.write(f"- [[{related}]]\n")
+            created.append(page.title)
+        return f"TARS > Grafo creado. Páginas generadas: {', '.join(created)}" 
