@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.venv
+venv/
+env/
+.env/
+.mypy_cache/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and databases
+*.log
+*.sqlite
+
+# Local development
+.env.local
+.env.development
+
+# Distribution packaging
+build/
+dist/
+*.egg-info/
